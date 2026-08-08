@@ -219,7 +219,10 @@ export function createInlineMarkdownEditor({
                         referenceFeatures.figure.highlight.activate,
                     translate: t,
                 }),
-                createTranslationOverlayExtension(),
+                createTranslationOverlayExtension({
+                    openLink,
+                    translate: t,
+                }),
                 EditorView.editable.of(false),
                 EditorState.readOnly.of(true),
                 keymap.of(searchKeymap),

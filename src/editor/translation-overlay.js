@@ -1,6 +1,9 @@
 import { StateEffect, StateField } from '@codemirror/state';
 import { Decoration, EditorView, WidgetType } from '@codemirror/view';
-import { appendRenderedMarkdown } from './rendered-markdown-dom.js';
+import {
+    appendRenderedMarkdown,
+    openRenderedLink,
+} from './rendered-markdown-dom.js';
 
 const XHTML_NAMESPACE = 'http://www.w3.org/1999/xhtml';
 const MAX_TRANSLATION_WIDGETS = 20_000;
@@ -12,7 +15,7 @@ export function createEmptyTranslationOverlay() {
     return { visible: false, targetLanguage: '', segments: [] };
 }
 
-export function createTranslationOverlayExtension() {
+export function createTranslationOverlayExtension({ openLink, translate } = {}) {
     return StateField.define({
         create() {
             return Decoration.none;
@@ -22,7 +25,9 @@ export function createTranslationOverlayExtension() {
                 if (effect.is(setTranslationOverlay)) {
                     return buildTranslationDecorations(
                         effect.value,
-                        transaction.newDoc.length
+                        transaction.newDoc.length,
+                        openLink,
+                        translate
                     );
                 }
             }
@@ -35,19 +40,23 @@ export function createTranslationOverlayExtension() {
 
 
 class TranslationWidget extends WidgetType {
-    constructor({ id, text, targetLanguage, kind }) {
+    constructor({ id, text, targetLanguage, kind, openLink, translate }) {
         super();
         this.id = id;
         this.text = text;
         this.targetLanguage = targetLanguage;
         this.kind = kind;
+        this.openLink = openLink;
+        this.translate = translate;
     }
 
     eq(other) {
         return this.id === other.id
             && this.text === other.text
             && this.targetLanguage === other.targetLanguage
-            && this.kind === other.kind;
+            && this.kind === other.kind
+            && this.openLink === other.openLink
+            && this.translate === other.translate;
     }
 
     toDOM(view) {
@@ -62,7 +71,16 @@ class TranslationWidget extends WidgetType {
         if (this.targetLanguage) {
             container.setAttribute('lang', this.targetLanguage);
         }
-        appendRenderedMarkdown(container, this.text, () => null, true);
+        appendRenderedMarkdown(
+            container,
+            this.text,
+            () => null,
+            true,
+            this.translate
+        );
+        container.addEventListener('mousedown', event => {
+            openRenderedLink(event, this.openLink);
+        });
         return container;
     }
 
@@ -71,7 +89,12 @@ class TranslationWidget extends WidgetType {
     }
 }
 
-function buildTranslationDecorations(overlay, documentLength) {
+function buildTranslationDecorations(
+    overlay,
+    documentLength,
+    openLink,
+    translate
+) {
     if (!overlay?.visible || !Array.isArray(overlay.segments)) {
         return Decoration.none;
     }
@@ -100,6 +123,8 @@ function buildTranslationDecorations(overlay, documentLength) {
                 text,
                 targetLanguage: String(overlay.targetLanguage || ''),
                 kind: segment.kind,
+                openLink,
+                translate,
             }),
             block: true,
             side: 1,
