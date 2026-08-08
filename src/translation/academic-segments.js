@@ -352,17 +352,28 @@ function cleanHeadingSource(value, nodeName) {
     return source.replace(/\r?\n {0,3}(?:=+|-+)[\t ]*$/u, '').trim();
 }
 
+function stripHtmlTags(value) {
+    let previous;
+    let output = String(value || '');
+    do {
+        previous = output;
+        output = output.replace(/<\/?[A-Za-z][^>]*>/gu, '');
+    } while (output !== previous);
+    return output;
+}
+
 function cleanMarkdownForTranslation(value) {
-    return String(value || '')
-        .replace(/^ {0,3}#{1,6}[\t ]+/gmu, '')
-        .replace(/[\t ]+#+[\t ]*$/gmu, '')
-        .replace(/\r?\n {0,3}(?:=+|-+)[\t ]*$/gmu, '')
-        .replace(/^ {0,3}(?:>\s*)+/gmu, '')
-        .replace(/^ {0,3}(?:[-+*]|\d+[.)])[\t ]+/gmu, '')
-        .replace(/!\[([^\]]*)\]\([^\r\n)]*\)/gu, '$1')
-        .replace(/\[([^\]]+)\]\((⟦MKTERO_\d+⟧)\)/gu, '$1 ($2)')
-        .replace(/<br\s*\/?>/giu, ' ')
-        .replace(/<\/?[A-Za-z][^>]*>/gu, '')
+    return stripHtmlTags(
+        String(value || '')
+            .replace(/^ {0,3}#{1,6}[\t ]+/gmu, '')
+            .replace(/[\t ]+#+[\t ]*$/gmu, '')
+            .replace(/\r?\n {0,3}(?:=+|-+)[\t ]*$/gmu, '')
+            .replace(/^ {0,3}(?:>\s*)+/gmu, '')
+            .replace(/^ {0,3}(?:[-+*]|\d+[.)])[\t ]+/gmu, '')
+            .replace(/!\[([^\]]*)\]\([^\r\n)]*\)/gu, '$1')
+            .replace(/\[([^\]]+)\]\((⟦MKTERO_\d+⟧)\)/gu, '$1 ($2)')
+            .replace(/<br\s*\/?>/giu, ' ')
+    )
         .replace(/(^|[\s([{])[*_~]{1,3}(?=\S)/gu, '$1')
         .replace(/[*_~]{1,3}(?=$|[\s)\]},.!?:;])/gu, '')
         .replace(/\\([\\`*_[\]{}()#+.!<>~-])/gu, '$1')
