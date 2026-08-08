@@ -103,7 +103,7 @@ test('creates, selects, masks, edits, and deletes translation services', async (
     );
     assert.equal(
         document.getElementById('mktero-translation-service-status').textContent,
-        'Translation service saved.'
+        'Translation service saved'
     );
 
     document.getElementById('mktero-translation-service-delete').click();

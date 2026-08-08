@@ -109,7 +109,10 @@ test('sanitizes adversarial HTML while still rendering translated math', () => {
     assert.ok(widget.querySelector('math'));
     assert.equal(widget.querySelectorAll('script').length, 0);
     assert.equal(widget.querySelectorAll('img').length, 0);
-    assert.doesNotMatch(widget.innerHTML, /onerror/i);
+    assert.ok(!widget.querySelector('[onerror]'));
+    assert.doesNotMatch(widget.innerHTML, /<(?:script|img)\b/i);
+    assert.match(widget.innerHTML, /&lt;script&gt;/);
+    assert.match(widget.innerHTML, /&lt;img /);
     assert.match(widget.textContent, /原始公式/);
     assert.match(widget.textContent, /继续/);
 

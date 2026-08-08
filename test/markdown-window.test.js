@@ -194,6 +194,11 @@ test('updates Markdown and PDF annotations as one editor document', () => {
         markdown: 'Important result.',
         annotationOverlay,
         sourceMap,
+        translationOverlay: {
+            visible: false,
+            targetLanguage: '',
+            segments: [],
+        },
     }]);
     view.destroy();
 });

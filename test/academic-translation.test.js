@@ -195,7 +195,16 @@ test('protects inline formulas, code, URLs, and citations exactly', () => {
 
     assert.equal(protectedText.placeholders.length, 4);
     assert.equal(protectedText.text.includes('$L(x)$'), false);
-    assert.equal(protectedText.text.includes('https://example.test'), false);
+    const urlPlaceholder = protectedText.placeholders.find(placeholder => (
+        /^https?:\/\//u.test(placeholder.value)
+    ));
+    assert.ok(urlPlaceholder);
+    assert.equal(
+        new URL(urlPlaceholder.value.replace(/[.,;:!?)]+$/u, '')).hostname,
+        'example.test'
+    );
+    assert.ok(protectedText.text.includes(urlPlaceholder.token));
+    assert.equal(protectedText.text.includes(urlPlaceholder.value), false);
 
     const translated = [
         '译文',
@@ -215,6 +224,16 @@ test('protects inline formulas, code, URLs, and citations exactly', () => {
         ),
         error => error.code === 'TRANSLATION_PLACEHOLDER_INVALID'
     );
+});
+
+test('strips nested HTML tags before translation', () => {
+    const protectedText = protectAcademicTranslationText(
+        'Safe text <scr<script>ipt>alert(1)</script> continues here.'
+    );
+    assert.equal(protectedText.text.includes('<script'), false);
+    assert.equal(protectedText.text.includes('</script>'), false);
+    assert.match(protectedText.text, /Safe text/u);
+    assert.match(protectedText.text, /continues here/u);
 });
 
 test('removes display formulas instead of sending them to the model', () => {
