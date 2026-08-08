@@ -95,6 +95,7 @@ import {
 import {
     localizeConversionError,
     localizeConversionResult,
+    localizeTranslationError,
 } from './ui/provider-neutral-copy.js';
 import { registerItemContextMenu } from './ui/item-context-menu.js';
 import { registerReaderToolbar } from './ui/reader-toolbar.js';
@@ -741,13 +742,7 @@ async function startDocumentTranslation(documentID, { force = false } = {}) {
         if (needsConfiguration) {
             void openMinerUPreferences(Zotero);
         }
-        const message = errorCode === 'TRANSLATION_AUTHENTICATION_FAILED'
-            ? runtimeTranslate('viewer.translation.authenticationFailed')
-            : needsConfiguration
-                ? runtimeTranslate('viewer.translation.serviceRequired')
-                : runtimeTranslate('viewer.translation.failed', {
-                    message: String(error?.message || 'Unknown error'),
-                });
+        const message = localizeTranslationError(error, runtimeTranslate);
         const current = runtime.presenter?.get(documentID)?.model?.translation
             || createEmptyTranslationState();
         recordTranslationFailure(documentID, configuration, {
