@@ -1,7 +1,10 @@
 import { createRuntimeAbortController } from '../platform/abort-controller.js';
 import {
+    concatenateUint8Arrays,
+    toUint8Array,
+} from '../mineru/binary.js';
+import {
     createTranslationRequest,
-    MAX_TRANSLATION_RESPONSE_CHARACTERS,
     parseChatCompletionResponse,
 } from './translation-protocol.js';
 
@@ -9,6 +12,8 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_ATTEMPTS = 4;
 const DEFAULT_RETRY_BASE_DELAY_MS = 1000;
 const DEFAULT_MAX_CONCURRENCY = 4;
+// The transport budget counts UTF-8 bytes, not decoded characters.
+const MAX_TRANSLATION_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 export class OpenAITranslationClient {
     constructor({
@@ -99,36 +104,22 @@ export class OpenAITranslationClient {
                 });
             }
             catch (error) {
-                if (signal?.aborted) throw abortError(signal.reason);
-                if (timedOut) {
-                    throw translationError(
-                        'The translation request timed out',
-                        'TRANSLATION_TIMEOUT',
-                        { retryable: true }
-                    );
-                }
-                if (!error?.code) error.code = 'TRANSLATION_NETWORK_ERROR';
-                error.retryable = true;
-                throw error;
-            }
-            const contentLength = Number(response.headers?.get?.('content-length'));
-            if (Number.isFinite(contentLength)
-                && contentLength > MAX_TRANSLATION_RESPONSE_CHARACTERS) {
-                throw translationError(
-                    'The translation response is too large',
-                    'TRANSLATION_RESPONSE_TOO_LARGE'
-                );
+                throw classifyRequestFailure(error, { signal, timedOut });
             }
             if (!response.ok) {
-                throw httpTranslationError(response);
+                await cancelResponseBody(response);
+                throw httpTranslationError(response, this.now());
             }
-            const text = await response.text();
-            if (new TextEncoder().encode(text).length
-                > MAX_TRANSLATION_RESPONSE_CHARACTERS) {
-                throw translationError(
-                    'The translation response is too large',
-                    'TRANSLATION_RESPONSE_TOO_LARGE'
+            let text;
+            try {
+                text = await readBoundedResponseText(
+                    response,
+                    MAX_TRANSLATION_RESPONSE_BYTES,
+                    controller.signal
                 );
+            }
+            catch (error) {
+                throw classifyRequestFailure(error, { signal, timedOut });
             }
             try {
                 return JSON.parse(text);
@@ -142,6 +133,7 @@ export class OpenAITranslationClient {
         }
         finally {
             if (timer !== undefined) this.clearTimeout?.(timer);
+            controller?.abort();
             if (abortFromParent) {
                 signal?.removeEventListener?.('abort', abortFromParent);
             }
@@ -237,7 +229,7 @@ class AsyncSemaphore {
     }
 }
 
-function httpTranslationError(response) {
+function httpTranslationError(response, now = Date.now()) {
     const status = Number(response?.status) || 0;
     const authentication = status === 401 || status === 403;
     const configuration = [400, 404, 405, 422].includes(status);
@@ -257,10 +249,101 @@ function httpTranslationError(response) {
         { status, retryable }
     );
     const retryAfter = response?.headers?.get?.('retry-after');
-    const retryAfterMs = parseRetryAfter(retryAfter);
+    const retryAfterMs = parseRetryAfter(retryAfter, now);
     if (retryAfterMs !== null) error.retryAfterMs = retryAfterMs;
     return error;
 }
+
+async function readBoundedResponseText(response, maxBytes, signal) {
+    const bytes = await readBoundedResponse(response, maxBytes, signal);
+    return new TextDecoder().decode(bytes);
+}
+
+async function readBoundedResponse(response, maxBytes, signal) {
+    const reader = response.body?.getReader?.();
+    if (!reader) {
+        await cancelResponseBody(response);
+        throw translationError(
+            'The translation response cannot be read safely',
+            'TRANSLATION_HTTP_RESPONSE_INVALID'
+        );
+    }
+
+    const chunks = [];
+    let length = 0;
+    try {
+        const declaredValue = response.headers?.get?.('content-length');
+        const declaredLength = Number(declaredValue);
+        if (declaredValue !== null
+            && String(declaredValue).trim() !== ''
+            && Number.isFinite(declaredLength)
+            && declaredLength > maxBytes) {
+            throw responseTooLargeError();
+        }
+        while (true) {
+            throwIfAborted(signal);
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = toUint8Array(value, 'Translation response chunk');
+            length += chunk.length;
+            if (length > maxBytes) {
+                throw responseTooLargeError();
+            }
+            chunks.push(chunk);
+        }
+    }
+    catch (error) {
+        await cancelReader(reader);
+        throw error;
+    }
+    return concatenateUint8Arrays(chunks, length);
+}
+
+async function cancelReader(reader) {
+    try {
+        await reader?.cancel?.();
+    }
+    catch {
+        // An errored or closed stream may reject cancellation.
+    }
+}
+
+async function cancelResponseBody(response) {
+    try {
+        await response?.body?.cancel?.();
+    }
+    catch {
+        // A locked, errored, or closed body may reject cancellation.
+    }
+}
+
+function responseTooLargeError() {
+    return translationError(
+        'The translation response is too large',
+        'TRANSLATION_RESPONSE_TOO_LARGE'
+    );
+}
+
+function classifyRequestFailure(error, { signal, timedOut }) {
+    if (signal?.aborted) return abortError(signal.reason);
+    if (typeof error?.code === 'string'
+        && error.code.startsWith('TRANSLATION_')) {
+        return error;
+    }
+    if (timedOut) {
+        return translationError(
+            'The translation request timed out',
+            'TRANSLATION_TIMEOUT',
+            { retryable: true }
+        );
+    }
+    return translationError(
+        'The translation service could not be reached',
+        'TRANSLATION_NETWORK_ERROR',
+        { retryable: true }
+    );
+}
+
 function parseRetryAfter(value, now = Date.now()) {
     const source = String(value || '').trim();
     if (!source) return null;

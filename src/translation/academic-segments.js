@@ -21,7 +21,23 @@ const SKIPPED_SUBTREES = new Set([
     'LinkReference',
     'Table',
 ]);
-const REFERENCE_HEADING_PATTERN = /^(?:references?|bibliograph(?:y|ies)|literature cited|works cited|参考文献|引用文献)$/iu;
+const REFERENCE_HEADING_PATTERN = /^(?:references?|references?[ \t]+and[ \t]+notes|reference[ \t]+list|bibliograph(?:y|ies)|literature[ \t]+cited|works[ \t]+cited|参考文献(?:[（(][ \t]*references?[ \t]*[）)])?|参考资料|参考书目|引用文献)$/iu;
+const HTML_VOID_ELEMENTS = new Set([
+    'area',
+    'base',
+    'br',
+    'col',
+    'embed',
+    'hr',
+    'img',
+    'input',
+    'link',
+    'meta',
+    'param',
+    'source',
+    'track',
+    'wbr',
+]);
 const PLACEHOLDER_PATTERN = /⟦MKTERO_(\d+)⟧/gu;
 const URL_PATTERN = /\bhttps?:\/\/[^\s<>{}\[\]"']+/giu;
 const NUMERIC_CITATION_PATTERN = /\[(?:\s*\d+[a-z]?(?:\s*[-–,;]\s*\d+[a-z]?)*\s*)\]/giu;
@@ -38,8 +54,9 @@ export function extractAcademicTranslationSegments(markdown) {
     const captionedFigures = figures.filter(figure => (
         String(figure?.caption?.text || '').trim()
     ));
+    const algorithmRanges = findMinerUAlgorithmGroups(source);
     const excludedRanges = [
-        ...findMinerUAlgorithmGroups(source),
+        ...algorithmRanges,
         ...captionedFigures,
         ...tables,
     ];
@@ -64,16 +81,22 @@ export function extractAcademicTranslationSegments(markdown) {
                     source.slice(node.from, node.to),
                     node.name
                 );
+                const safeHeadingText = privacySafeSegmentSource(
+                    headingText
+                ).trim();
                 if (referenceLevel !== null && level <= referenceLevel) {
                     referenceLevel = null;
                 }
                 headingPath.length = level - 1;
-                if (REFERENCE_HEADING_PATTERN.test(headingText)) {
+                if (isReferenceHeading(htmlTextForReferenceDetection(
+                    headingText
+                ))) {
                     referenceLevel = level;
-                    headingPath[level - 1] = headingText;
+                    headingPath[level - 1] = safeHeadingText;
                     return false;
                 }
-                headingPath[level - 1] = headingText;
+                headingPath[level - 1] = safeHeadingText;
+                if (referenceLevel !== null) return false;
                 const table = overlappingRange(tables, node);
                 if (table) {
                     ensureTableCaptionSegment({
@@ -81,23 +104,31 @@ export function extractAcademicTranslationSegments(markdown) {
                         headingPath,
                         segments,
                         appendedTables,
+                        algorithmRanges,
                     });
                     return false;
                 }
-                if (referenceLevel === null) {
-                    appendSegment({
-                        source,
-                        node,
-                        kind: 'heading',
-                        headingPath,
-                        excludedRanges,
-                        displayMathRanges,
-                        segments,
-                    });
-                }
+                appendSegment({
+                    source,
+                    node,
+                    kind: 'heading',
+                    headingPath,
+                    excludedRanges,
+                    displayMathRanges,
+                    segments,
+                });
                 return false;
             }
-            if (node.name === 'Paragraph' && referenceLevel === null) {
+            if (node.name === 'Paragraph') {
+                if (referenceLevel === null
+                    && isStandaloneReferenceParagraph(node)
+                    && isReferenceHeading(htmlTextForReferenceDetection(
+                        source.slice(node.from, node.to)
+                    ))) {
+                    referenceLevel = 7;
+                    return false;
+                }
+                if (referenceLevel !== null) return false;
                 const table = overlappingRange(tables, node);
                 if (table) {
                     ensureTableCaptionSegment({
@@ -105,6 +136,7 @@ export function extractAcademicTranslationSegments(markdown) {
                         headingPath,
                         segments,
                         appendedTables,
+                        algorithmRanges,
                     });
                     return false;
                 }
@@ -112,6 +144,10 @@ export function extractAcademicTranslationSegments(markdown) {
                 if (figure) {
                     if (!appendedFigures.has(figure)) {
                         appendedFigures.add(figure);
+                        if (overlapsAny(figure, algorithmRanges)) {
+                            resolvedFigures.add(figure);
+                            return false;
+                        }
                         const result = appendFigureCaptionSegment({
                             figure,
                             headingPath,
@@ -162,13 +198,16 @@ export function protectAcademicTranslationText(source, {
     sourceOffset = 0,
 } = {}) {
     const value = String(source || '');
-    const removals = displayMathRanges
-        .map(range => ({
-            from: Math.max(0, range.from - sourceOffset),
-            to: Math.min(value.length, range.to - sourceOffset),
-            remove: true,
-        }))
-        .filter(range => range.from < range.to);
+    const removals = [
+        ...displayMathRanges
+            .map(range => ({
+                from: Math.max(0, range.from - sourceOffset),
+                to: Math.min(value.length, range.to - sourceOffset),
+                remove: true,
+            }))
+            .filter(range => range.from < range.to),
+        ...findRawHtmlRemovalRanges(value),
+    ];
     const protectedRanges = [];
     TRANSLATION_PARSER.parse(value).iterate({
         enter(node) {
@@ -217,7 +256,10 @@ export function restoreAcademicTranslationPlaceholders(text, placeholders) {
         if (seen.get(placeholder.token) !== 1) {
             throw invalidPlaceholderError();
         }
-        output = output.replace(placeholder.token, placeholder.value);
+        output = output.replace(
+            placeholder.token,
+            () => placeholder.value
+        );
     }
     const hasUnexpectedPlaceholder = PLACEHOLDER_PATTERN.test(output);
     PLACEHOLDER_PATTERN.lastIndex = 0;
@@ -275,7 +317,7 @@ function appendSegment({
         anchor: node.to,
         kind,
         headingPath: headingPath.filter(Boolean).slice(),
-        source: raw,
+        source: privacySafeSegmentSource(raw),
         preparedText: protectedText.text,
         placeholders: protectedText.placeholders,
     });
@@ -292,7 +334,7 @@ function appendFigureCaptionSegment({ figure, headingPath, segments }) {
         anchor: figure.to,
         kind: 'figure-caption',
         headingPath: headingPath.filter(Boolean).slice(),
-        source: raw,
+        source: privacySafeSegmentSource(raw),
         preparedText: protectedText.text,
         placeholders: protectedText.placeholders,
     });
@@ -304,9 +346,11 @@ function ensureTableCaptionSegment({
     headingPath,
     segments,
     appendedTables,
+    algorithmRanges = [],
 }) {
     if (appendedTables.has(table)) return;
     appendedTables.add(table);
+    if (overlapsAny(table, algorithmRanges)) return;
     appendTableCaptionSegment({ table, headingPath, segments });
 }
 
@@ -321,10 +365,23 @@ function appendTableCaptionSegment({ table, headingPath, segments }) {
         anchor: table.to,
         kind: 'table-caption',
         headingPath: headingPath.filter(Boolean).slice(),
-        source: raw,
+        source: privacySafeSegmentSource(raw),
         preparedText: protectedText.text,
         placeholders: protectedText.placeholders,
     });
+}
+
+function privacySafeSegmentSource(value) {
+    const source = String(value || '');
+    const htmlRanges = findRawHtmlRemovalRanges(source);
+    if (!htmlRanges.length) return stripResidualHtmlTags(source);
+    return stripResidualHtmlTags(applyReplacements(
+        source,
+        mergeProtectedRanges(htmlRanges).map(range => ({
+            ...range,
+            replacement: ' ',
+        }))
+    ));
 }
 
 function overlappingRange(ranges, node) {
@@ -352,18 +409,265 @@ function cleanHeadingSource(value, nodeName) {
     return source.replace(/\r?\n {0,3}(?:=+|-+)[\t ]*$/u, '').trim();
 }
 
-function stripHtmlTags(value) {
+function isReferenceHeading(value) {
+    let normalized = String(value || '')
+        .replace(/^ {0,3}#{1,6}[\t ]+/u, '')
+        .replace(/[\t ]+#+[\t ]*$/u, '')
+        .trim();
+    for (let pass = 0; pass < 2; pass++) {
+        normalized = normalized
+            .replace(/[\t ]*[:：][\t ]*$/u, '')
+            .replace(/^(?:\*{1,2}|_{1,2})+/u, '')
+            .replace(/(?:\*{1,2}|_{1,2})+$/u, '')
+            .replace(/^\d+(?:\.\d+)*[.)]?[\t ]+/u, '')
+            .trim();
+    }
+    normalized = normalized.replace(/[\t ]+/gu, ' ');
+    return REFERENCE_HEADING_PATTERN.test(normalized);
+}
+
+function htmlTextForReferenceDetection(value) {
+    const source = String(value || '');
+    const output = [];
+    const openings = [];
+    for (let offset = 0; offset < source.length; offset++) {
+        let token = null;
+        if (source[offset] === '<') {
+            token = readRawHtmlToken(source, offset, false);
+            if (token?.kind === 'opaque') {
+                offset = token.to - 1;
+                continue;
+            }
+            if (token && token.kind !== 'malformed') {
+                offset = token.to - 1;
+                continue;
+            }
+        }
+        output.push(source[offset]);
+        if (source[offset] === '<') {
+            if (token?.nested) {
+                openings.push({
+                    from: output.length - 1,
+                    quote: '',
+                });
+            }
+            continue;
+        }
+        const opening = openings.at(-1);
+        if (!opening) continue;
+        if (opening.quote) {
+            if (source[offset] === opening.quote) opening.quote = '';
+            continue;
+        }
+        if (source[offset] === '"' || source[offset] === '\'') {
+            opening.quote = source[offset];
+            continue;
+        }
+        if (source[offset] !== '>') continue;
+        const candidate = output.slice(opening.from).join('');
+        openings.pop();
+        if (isCompleteHtmlTag(candidate)) output.length = opening.from;
+    }
+    return output.join('').replace(
+        /<\/?[A-Za-z][A-Za-z0-9:-]*/gu,
+        ''
+    );
+}
+
+function isCompleteHtmlTag(value) {
+    const source = String(value || '');
+    if (source[0] !== '<' || source.at(-1) !== '>') return false;
+    let offset = source[1] === '/' ? 2 : 1;
+    if (!/[A-Za-z]/u.test(source[offset] || '')) return false;
+    while (/[A-Za-z0-9:-]/u.test(source[offset] || '')) offset++;
+    let quote = '';
+    for (; offset < source.length - 1; offset++) {
+        const character = source[offset];
+        if (quote) {
+            if (character === quote) quote = '';
+            continue;
+        }
+        if (character === '"' || character === '\'') {
+            quote = character;
+            continue;
+        }
+        if (character === '<') return false;
+    }
+    return !quote;
+}
+
+function isStandaloneReferenceParagraph(node) {
+    return node.node.parent?.name === 'Document';
+}
+
+function findRawHtmlRemovalRanges(value) {
+    const source = String(value || '');
+    const ranges = [];
+    const openTags = [];
+    let offset = 0;
+    while (offset < source.length) {
+        const from = source.indexOf('<', offset);
+        if (from < 0) break;
+        const token = readRawHtmlToken(source, from);
+        if (!token) {
+            offset = from + 1;
+            continue;
+        }
+        offset = Math.max(from + 1, token.to);
+        if (token.kind === 'opaque'
+            || token.kind === 'malformed'
+            || token.kind === 'self-closing') {
+            ranges.push({ from: token.from, to: token.to, remove: true });
+            continue;
+        }
+        if (token.kind === 'closing') {
+            let matched = false;
+            for (let index = openTags.length - 1; index >= 0; index--) {
+                if (openTags[index].name !== token.name) continue;
+                const opening = openTags[index];
+                openTags.length = index;
+                ranges.push({ from: opening.from, to: token.to, remove: true });
+                matched = true;
+                break;
+            }
+            if (!matched) {
+                ranges.push({ from: token.from, to: token.to, remove: true });
+            }
+            continue;
+        }
+        if (HTML_VOID_ELEMENTS.has(token.name)) {
+            ranges.push({ from: token.from, to: token.to, remove: true });
+            continue;
+        }
+        openTags.push(token);
+    }
+    for (const opening of openTags) {
+        ranges.push({ from: opening.from, to: source.length, remove: true });
+    }
+    return ranges;
+}
+
+function readRawHtmlToken(source, from, recoverMalformed = true) {
+    if (source.startsWith('<!--', from)) {
+        return opaqueHtmlToken(source, from, '-->');
+    }
+    if (source.slice(from, from + 9).toUpperCase() === '<![CDATA[') {
+        return opaqueHtmlToken(source, from, ']]>');
+    }
+    if (source.startsWith('<?', from)) {
+        return opaqueHtmlToken(source, from, '?>');
+    }
+    if (source.startsWith('<!', from)) {
+        return declarationHtmlToken(source, from);
+    }
+
+    let offset = from + 1;
+    let closing = false;
+    if (source[offset] === '/') {
+        closing = true;
+        offset++;
+    }
+    if (!/[A-Za-z]/u.test(source[offset] || '')) return null;
+    const nameFrom = offset;
+    while (/[A-Za-z0-9:-]/u.test(source[offset] || '')) offset++;
+    const name = source.slice(nameFrom, offset).toLowerCase();
+    let quote = '';
+    for (; offset < source.length; offset++) {
+        const character = source[offset];
+        if (quote) {
+            if (character === quote) quote = '';
+            continue;
+        }
+        if (character === '"' || character === '\'') {
+            quote = character;
+            continue;
+        }
+        if (character === '<') {
+            return {
+                kind: 'malformed',
+                from,
+                to: recoverMalformed
+                    ? findMalformedHtmlEnd(source, offset + 1)
+                    : offset + 1,
+                nested: true,
+            };
+        }
+        if (character !== '>') continue;
+        const to = offset + 1;
+        if (closing) {
+            return { kind: 'closing', name, from, to };
+        }
+        const selfClosing = /\/[\t ]*>$/u.test(source.slice(from, to));
+        return {
+            kind: selfClosing ? 'self-closing' : 'opening',
+            name,
+            from,
+            to,
+        };
+    }
+    return { kind: 'malformed', from, to: source.length };
+}
+
+function opaqueHtmlToken(source, from, terminator) {
+    const terminatorFrom = source.indexOf(terminator, from + 2);
+    return {
+        kind: 'opaque',
+        from,
+        to: terminatorFrom < 0
+            ? source.length
+            : terminatorFrom + terminator.length,
+    };
+}
+
+function declarationHtmlToken(source, from) {
+    let quote = '';
+    let subsetDepth = 0;
+    for (let offset = from + 2; offset < source.length; offset++) {
+        const character = source[offset];
+        if (quote) {
+            if (character === quote) quote = '';
+            continue;
+        }
+        if (character === '"' || character === '\'') {
+            quote = character;
+            continue;
+        }
+        if (character === '[') {
+            subsetDepth++;
+            continue;
+        }
+        if (character === ']' && subsetDepth) {
+            subsetDepth--;
+            continue;
+        }
+        if (character === '>' && subsetDepth === 0) {
+            return { kind: 'opaque', from, to: offset + 1 };
+        }
+    }
+    return { kind: 'opaque', from, to: source.length };
+}
+
+function findMalformedHtmlEnd(source, from) {
+    const closingTagPattern = /<\/[A-Za-z][A-Za-z0-9:-]*[\t ]*>/gu;
+    closingTagPattern.lastIndex = from;
+    const match = closingTagPattern.exec(source);
+    return match ? match.index + match[0].length : source.length;
+}
+
+function stripResidualHtmlTags(value) {
     let previous;
     let output = String(value || '');
     do {
         previous = output;
-        output = output.replace(/<\/?[A-Za-z][^>]*>/gu, '');
+        output = output
+            .replace(/<br\s*\/?>/giu, ' ')
+            .replace(/<\/?[A-Za-z][^>]*>/gu, ' ');
     } while (output !== previous);
     return output;
 }
 
 function cleanMarkdownForTranslation(value) {
-    return stripHtmlTags(
+    return stripResidualHtmlTags(
         String(value || '')
             .replace(/^ {0,3}#{1,6}[\t ]+/gmu, '')
             .replace(/[\t ]+#+[\t ]*$/gmu, '')
@@ -372,7 +676,6 @@ function cleanMarkdownForTranslation(value) {
             .replace(/^ {0,3}(?:[-+*]|\d+[.)])[\t ]+/gmu, '')
             .replace(/!\[([^\]]*)\]\([^\r\n)]*\)/gu, '$1')
             .replace(/\[([^\]]+)\]\((⟦MKTERO_\d+⟧)\)/gu, '$1 ($2)')
-            .replace(/<br\s*\/?>/giu, ' ')
     )
         .replace(/(^|[\s([{])[*_~]{1,3}(?=\S)/gu, '$1')
         .replace(/[*_~]{1,3}(?=$|[\s)\]},.!?:;])/gu, '')
