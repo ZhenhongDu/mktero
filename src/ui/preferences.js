@@ -454,9 +454,9 @@ export function createPreferencesController({
 
     function showTranslationError(error) {
         zotero.logError?.(error);
-        const prefix = t('preferences.translation.invalidService');
-        translation.serviceStatus.textContent = `${prefix} ${error.message || ''}`
-            .trim();
+        translation.serviceStatus.textContent = t(
+            'preferences.translation.invalidService'
+        );
         translation.serviceStatus.setAttribute('data-status', 'error');
     }
 

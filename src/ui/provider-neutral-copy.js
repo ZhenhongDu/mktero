@@ -66,6 +66,23 @@ const WARNING_MESSAGE_KEYS = new Map([
     ],
 ]);
 
+const TRANSLATION_ERROR_CODE_KEYS = new Map([
+    ['TRANSLATION_AUTHENTICATION_FAILED', 'viewer.translation.authenticationFailed'],
+    ['TRANSLATION_SERVICE_REQUIRED', 'viewer.translation.serviceRequired'],
+    ['TRANSLATION_INSECURE_TRANSPORT', 'viewer.translation.insecureTransport'],
+    ['TRANSLATION_CONFIGURATION_INVALID', 'viewer.translation.configurationInvalid'],
+    ['TRANSLATION_TIMEOUT', 'viewer.translation.timeout'],
+    ['TRANSLATION_NETWORK_ERROR', 'viewer.translation.networkFailed'],
+    ['TRANSLATION_HTTP_ERROR', 'viewer.translation.httpFailed'],
+    ['TRANSLATION_RESPONSE_TOO_LARGE', 'viewer.translation.responseTooLarge'],
+    ['TRANSLATION_HTTP_RESPONSE_INVALID', 'viewer.translation.protocolInvalid'],
+    ['TRANSLATION_PROTOCOL_INVALID', 'viewer.translation.protocolInvalid'],
+    ['TRANSLATION_DOCUMENT_TOO_LARGE', 'viewer.translation.documentTooLarge'],
+    ['TRANSLATION_PLACEHOLDER_INVALID', 'viewer.translation.protocolInvalid'],
+    ['TRANSLATION_REQUEST_FAILED', 'viewer.translation.failed'],
+    ['TRANSLATION_FAILED', 'viewer.translation.failed'],
+]);
+
 export function removeProviderBranding(message) {
     return String(message || '').replace(/\bMinerU\b/gi, 'PDF conversion service');
 }
@@ -92,6 +109,12 @@ export function localizeConversionError(error, translate = translateEnglish) {
         return translate('error.resultInvalid');
     }
     return translate('error.conversionFailed');
+}
+
+export function localizeTranslationError(error, translate = translateEnglish) {
+    const codeKey = TRANSLATION_ERROR_CODE_KEYS.get(error?.code);
+    if (codeKey) return translate(codeKey);
+    return translate('viewer.translation.failed');
 }
 
 export function localizeConversionResult(result, translate = translateEnglish) {
