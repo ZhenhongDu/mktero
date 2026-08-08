@@ -4,6 +4,7 @@ import { createLocalization } from '../src/i18n/localization.js';
 import {
     localizeConversionError,
     localizeConversionResult,
+    localizeTranslationError,
     removeProviderBranding,
 } from '../src/ui/provider-neutral-copy.js';
 
@@ -69,4 +70,38 @@ test('localizes fallback titles and conversion warnings', () => {
         '部分本地 Markdown 标注无法同步到 PDF。',
         '转换过程中发生了一个不影响阅读的问题。',
     ]);
+});
+
+test('localizes translation errors by code without exposing internal messages', () => {
+    const localization = createLocalization({ zoteroLocale: 'zh-CN' });
+    const translate = localization.t.bind(localization);
+    const timeout = new Error('socket hang up after 120000ms');
+    timeout.code = 'TRANSLATION_TIMEOUT';
+    assert.equal(
+        localizeTranslationError(timeout, translate),
+        '翻译请求超时。'
+    );
+    assert.doesNotMatch(
+        localizeTranslationError(timeout, translate),
+        /socket hang up/i
+    );
+
+    const unknown = new Error('internal implementation detail');
+    unknown.code = 'SOME_INTERNAL_CODE';
+    assert.equal(
+        localizeTranslationError(unknown, translate),
+        '翻译失败。'
+    );
+    assert.doesNotMatch(
+        localizeTranslationError(unknown, translate),
+        /internal implementation detail/i
+    );
+
+    const english = createLocalization({ zoteroLocale: 'en-US' });
+    const network = new Error('fetch failed: ECONNREFUSED');
+    network.code = 'TRANSLATION_NETWORK_ERROR';
+    assert.equal(
+        localizeTranslationError(network, english.t.bind(english)),
+        'The translation service could not be reached.'
+    );
 });

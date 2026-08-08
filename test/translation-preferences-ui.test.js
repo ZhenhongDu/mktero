@@ -153,3 +153,49 @@ test('creates, selects, masks, edits, and deletes translation services', async (
     controller.destroy();
     dom.window.close();
 });
+
+test('shows a localized translation preference error without raw details', async () => {
+    const dom = preferencesDocument();
+    const { document } = dom.window;
+    const values = new Map();
+    let loggedError = null;
+    const zotero = {
+        Prefs: {
+            get: key => values.get(key),
+            set: (key, value) => {
+                values.set(key, value);
+            },
+        },
+        logError(error) {
+            loggedError = error;
+        },
+    };
+    const controller = createPreferencesController({
+        document,
+        zotero,
+        cache: {
+            getStats: async () => ({ entries: 0, sizeBytes: 0 }),
+            clear: async () => {},
+        },
+    });
+    await controller.init();
+
+    document.getElementById('mktero-translation-service-new').click();
+    document.getElementById('mktero-translation-service-name').value
+        = 'Invalid API';
+    document.getElementById('mktero-translation-api-url').value
+        = 'ftp://private.internal.invalid/v1';
+    document.getElementById('mktero-translation-model').value = 'model-a';
+    document.getElementById('mktero-translation-service-save').click();
+
+    const visible = document.getElementById(
+        'mktero-translation-service-status'
+    ).textContent;
+    assert.ok(loggedError instanceof Error);
+    assert.equal(visible, 'The translation service is invalid.');
+    assert.equal(visible.includes(loggedError.message), false);
+    assert.doesNotMatch(visible, /private\.internal/iu);
+
+    controller.destroy();
+    dom.window.close();
+});

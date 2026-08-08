@@ -57,6 +57,25 @@ test('keeps translations outside snapshot persistence and source Markdown', asyn
     assert.equal(overlay.includes('changes:'), false);
 });
 
+test('routes translation failures through localized presenter copy', async () => {
+    const bootstrap = await readFile(
+        new URL('../src/bootstrap.js', import.meta.url),
+        'utf8'
+    );
+    const translation = sourceBlock(
+        bootstrap,
+        'async function startDocumentTranslation',
+        'function recordTranslationFailure'
+    );
+
+    assert.ok(translation.includes(
+        'localizeTranslationError(error, runtimeTranslate)'
+    ));
+    assert.ok(translation.includes('error: message'));
+    assert.equal(translation.includes('error: error.message'), false);
+    assert.equal(translation.includes('error.message'), false);
+});
+
 function sourceBlock(source, startMarker, endMarker) {
     const start = source.indexOf(startMarker);
     const end = source.indexOf(endMarker, start + startMarker.length);

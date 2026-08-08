@@ -203,7 +203,7 @@ test('includes segmentation version in translation cache keys', async () => {
         targetLanguage: 'zh-CN',
         systemPrompt: 'Academic prompt',
     };
-    assert.equal(TRANSLATION_SEGMENTATION_VERSION, 3);
+    assert.equal(TRANSLATION_SEGMENTATION_VERSION, 4);
 
     const markdown = 'Markdown source';
     const key = await createTranslationCacheKey(markdown, configuration, {
@@ -214,7 +214,7 @@ test('includes segmentation version in translation cache keys', async () => {
         { crypto: webcrypto }
     );
     const descriptor = translationProfileDescriptor(configuration);
-    assert.equal(descriptor.segmentationVersion, 3);
+    assert.equal(descriptor.segmentationVersion, 4);
     const expected = await sha256Hex(new TextEncoder().encode(JSON.stringify({
         sourceHash,
         ...descriptor,

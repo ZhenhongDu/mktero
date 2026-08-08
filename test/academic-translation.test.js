@@ -226,14 +226,295 @@ test('protects inline formulas, code, URLs, and citations exactly', () => {
     );
 });
 
-test('strips nested HTML tags before translation', () => {
+test('restores placeholder values without replacement-string expansion', () => {
     const protectedText = protectAcademicTranslationText(
+        'Use `$` and `$$` as literal examples.'
+    );
+    const translated = [
+        '译文',
+        ...protectedText.placeholders.map(placeholder => placeholder.token),
+    ].join(' ');
+
+    assert.equal(
+        restoreAcademicTranslationPlaceholders(
+            translated,
+            protectedText.placeholders
+        ),
+        '译文 `$` `$$`'
+    );
+});
+
+test('strips nested HTML tags and their content before translation', () => {
+    const nested = protectAcademicTranslationText(
         'Safe text <scr<script>ipt>alert(1)</script> continues here.'
     );
-    assert.equal(protectedText.text.includes('<script'), false);
-    assert.equal(protectedText.text.includes('</script>'), false);
-    assert.match(protectedText.text, /Safe text/u);
-    assert.match(protectedText.text, /continues here/u);
+    assert.equal(nested.text.includes('<script'), false);
+    assert.equal(nested.text.includes('</script>'), false);
+    assert.equal(nested.text.includes('alert(1)'), false);
+    assert.match(nested.text, /Safe text/u);
+    assert.match(nested.text, /continues here/u);
+
+    const paired = protectAcademicTranslationText(
+        'Safe text <script>alert(1)</script> continues here.'
+    );
+    assert.equal(paired.text.includes('alert(1)'), false);
+    assert.match(paired.text, /Safe text/u);
+    assert.match(paired.text, /continues here/u);
+});
+
+test('keeps reference-section variants and their entries out of translation payloads', () => {
+    const sentinel = 'PRIVACY_SENTINEL_REF';
+    for (const heading of [
+        '## **References**',
+        '## 7. References',
+        '## References:',
+        '## References and Notes',
+        '## Reference List',
+        '## 参考文献（References）',
+        '## <b>References</b>',
+        '## <b>Ref</b>erences',
+        '## <b>Ref<!-- hidden -->erences</b>',
+        '## <span data-a="x>y">References</span>',
+        '## <scr<b>ipt>References',
+    ]) {
+        const markdown = [
+            '# Methods',
+            '',
+            'We measure reconstruction quality carefully.',
+            '',
+            heading,
+            '',
+            `1. Smith et al. ${sentinel} must stay private.`,
+            '',
+            '## Appendix',
+            '',
+            'Additional English analysis is included here.',
+        ].join('\n');
+        assertTranslationPrivacy(markdown, sentinel);
+    }
+});
+
+test('keeps standalone reference headings and their entries out of payloads', () => {
+    const sentinel = 'PRIVACY_SENTINEL_REF_STANDALONE';
+    const markdown = [
+        '# Methods',
+        '',
+        'We measure reconstruction quality carefully.',
+        '',
+        '**References**',
+        '',
+        `1. Smith et al. ${sentinel} must stay private.`,
+        '',
+        '## Appendix',
+        '',
+        'Additional English analysis is included here.',
+    ].join('\n');
+    assertTranslationPrivacy(markdown, sentinel);
+    const segments = extractAcademicTranslationSegments(markdown);
+    assert.equal(
+        segments.some(segment => segment.source.includes('References')),
+        false
+    );
+    assert.ok(
+        segments.some(segment => segment.source.includes('Additional English'))
+    );
+});
+
+test('handles adversarial standalone paragraphs without quadratic scans', {
+    timeout: 2000,
+}, () => {
+    const comparisons = 'value < threshold and result > baseline. '.repeat(2000);
+    const comparisonSegments = extractAcademicTranslationSegments([
+        '# Results',
+        '',
+        comparisons,
+    ].join('\n'));
+    const malformedSegments = extractAcademicTranslationSegments([
+        '# Results',
+        '',
+        '<a<b> x > '.repeat(5000),
+    ].join('\n'));
+
+    assert.ok(
+        comparisonSegments.some(segment => (
+            segment.source.includes('value < threshold')
+        ))
+    );
+    assert.ok(Array.isArray(malformedSegments));
+});
+
+test('keeps reference-section table captions out of translation payloads', () => {
+    const sentinel = 'PRIVACY_SENTINEL_REF_TABLE';
+    const markdown = [
+        '# Methods',
+        '',
+        '## References',
+        '',
+        '### Table 1',
+        '',
+        `Reviewer note ${sentinel} must stay private.`,
+        '',
+        '| Source | Value |',
+        '| --- | --- |',
+        '| Hidden | 1 |',
+        '',
+        '## Appendix',
+        '',
+        'Additional English analysis is included here.',
+    ].join('\n');
+    assertTranslationPrivacy(markdown, sentinel);
+    const segments = extractAcademicTranslationSegments(markdown);
+    assert.equal(
+        segments.some(segment => segment.kind === 'table-caption'),
+        false
+    );
+});
+
+test('keeps algorithm-block figure captions out of translation payloads', () => {
+    const sentinel = 'PRIVACY_SENTINEL_ALGO';
+    const markdown = [
+        '# Methods',
+        '',
+        '<div class="mineru-algorithm" style="white-space: pre-wrap; font-family:monospace;">',
+        '',
+        `![Algorithm 1. ${sentinel} secret steps.](images/algorithm-1.png)`,
+        '',
+        '</div>',
+        '',
+        'The surrounding English methods discussion remains available.',
+    ].join('\n');
+    assertTranslationPrivacy(markdown, sentinel);
+    const segments = extractAcademicTranslationSegments(markdown);
+    assert.equal(
+        segments.some(segment => segment.kind === 'figure-caption'),
+        false
+    );
+    assert.ok(
+        segments.some(segment => segment.source.includes(
+            'The surrounding English methods discussion'
+        ))
+    );
+});
+
+test('keeps algorithm-block table captions out of translation payloads', () => {
+    const sentinel = 'PRIVACY_SENTINEL_ALGO_TABLE';
+    const markdown = [
+        '# Methods',
+        '',
+        '<div class="mineru-algorithm" style="white-space: pre-wrap;">',
+        '',
+        `Table 1. ${sentinel} secret algorithm metrics.`,
+        '',
+        '| Stage | Value |',
+        '| --- | --- |',
+        '| Hidden | 1 |',
+        '',
+        '</div>',
+        '',
+        'The surrounding English methods discussion remains available.',
+    ].join('\n');
+    assertTranslationPrivacy(markdown, sentinel);
+    const segments = extractAcademicTranslationSegments(markdown);
+    assert.equal(
+        segments.some(segment => segment.kind === 'table-caption'),
+        false
+    );
+    assert.ok(
+        segments.some(segment => segment.source.includes(
+            'The surrounding English methods discussion'
+        ))
+    );
+});
+
+test('keeps raw HTML content out of extracted segments and translation payloads', () => {
+    const cases = [
+        {
+            sentinel: 'PRIVACY_SENTINEL_HTML_PAIRED',
+            html: marker => `<span>${marker}</span>`,
+            keepsSuffix: true,
+        },
+        {
+            sentinel: 'PRIVACY_SENTINEL_HTML_MALFORMED',
+            html: marker => `<scr<script>ipt>${marker}</script>`,
+            keepsSuffix: true,
+        },
+        {
+            sentinel: 'PRIVACY_SENTINEL_HTML_COMMENT',
+            html: marker => `<!-- ${marker} -->`,
+            keepsSuffix: true,
+        },
+        {
+            sentinel: 'PRIVACY_SENTINEL_HTML_DECLARATION',
+            html: marker => `<!DOCTYPE ${marker}>`,
+            keepsSuffix: true,
+        },
+        {
+            sentinel: 'PRIVACY_SENTINEL_HTML_CDATA',
+            html: marker => `<![CDATA[${marker}]]>`,
+            keepsSuffix: true,
+        },
+        {
+            sentinel: 'PRIVACY_SENTINEL_HTML_PROCESSING',
+            html: marker => `<?instruction ${marker}?>`,
+            keepsSuffix: true,
+        },
+        {
+            sentinel: 'PRIVACY_SENTINEL_HTML_UNCLOSED',
+            html: marker => `<span>${marker} hidden trailing words`,
+            keepsSuffix: false,
+        },
+    ];
+    for (const { sentinel, html, keepsSuffix } of cases) {
+        const markdown = [
+            '# Methods',
+            '',
+            `Safe text ${html(sentinel)} continues here with English words.`,
+            '',
+            'Later English analysis remains available for translation.',
+        ].join('\n');
+        assertTranslationPrivacy(markdown, sentinel);
+        const segments = extractAcademicTranslationSegments(markdown);
+        assert.ok(
+            segments.some(segment => segment.source.includes('Safe text'))
+        );
+        assert.ok(
+            segments.some(segment => segment.source.includes(
+                'Later English analysis'
+            ))
+        );
+        assert.equal(
+            segments.some(segment => segment.source.includes('continues here')),
+            keepsSuffix
+        );
+    }
+});
+
+test('keeps raw HTML content out of heading paths and payloads', () => {
+    for (const { sentinel, heading } of [
+        {
+            sentinel: 'PRIVACY_SENTINEL_HEADING_COMMENT',
+            heading: marker => `# Methods <!-- ${marker} -->`,
+        },
+        {
+            sentinel: 'PRIVACY_SENTINEL_HEADING_PAIRED',
+            heading: marker => `# Methods <span>${marker}</span>`,
+        },
+        {
+            sentinel: 'PRIVACY_SENTINEL_HEADING_UNCLOSED',
+            heading: marker => `# Methods <span>${marker}`,
+        },
+        {
+            sentinel: 'PRIVACY_SENTINEL_HEADING_ATTRIBUTE',
+            heading: marker => `# Methods <img src="secret/${marker}.png">`,
+        },
+    ]) {
+        const markdown = [
+            heading(sentinel),
+            '',
+            'Some English paragraph remains available for translation.',
+        ].join('\n');
+        assertTranslationPrivacy(markdown, sentinel);
+    }
 });
 
 test('removes display formulas instead of sending them to the model', () => {
@@ -354,6 +635,29 @@ test('excludes secrets, service names, and QPS from the cache profile', () => {
     assert.equal('name' in profile, false);
     assert.equal('maxRequestsPerSecond' in profile, false);
     assert.equal(profile.model, SERVICE.model);
-    assert.equal(profile.segmentationVersion, 3);
+    assert.equal(profile.segmentationVersion, 4);
     assert.match(profile.protocolPrompt, /untrusted data/u);
 });
+
+function assertTranslationPrivacy(markdown, sentinel) {
+    const segments = extractAcademicTranslationSegments(markdown);
+    for (const segment of segments) {
+        assert.equal(String(segment.source || '').includes(sentinel), false);
+        assert.equal(String(segment.preparedText || '').includes(sentinel), false);
+        assert.equal(JSON.stringify(segment.headingPath || []).includes(sentinel), false);
+        assert.equal(JSON.stringify(segment.placeholders || []).includes(sentinel), false);
+    }
+    if (!segments.length) {
+        assert.equal(JSON.stringify(segments).includes(sentinel), false);
+        return;
+    }
+    const { chunks } = createTranslationBatches(segments, SERVICE);
+    const body = createTranslationRequest({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate into {{targetLanguage}}.',
+        documentTitle: 'Paper title',
+        segments: chunks,
+    });
+    assert.equal(JSON.stringify(body).includes(sentinel), false);
+}

@@ -20,21 +20,122 @@ const SEGMENTS = [{
 }];
 
 function textResponse(body, status = 200, headers = {}) {
+    const text = typeof body === 'string' ? body : JSON.stringify(body);
+    const bytes = new TextEncoder().encode(text);
+    const response = streamResponse([bytes], status, headers);
+    response.text = async () => text;
+    response.arrayBuffer = async () => bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength
+    );
+    return response;
+}
+
+function streamResponse(chunks, status = 200, headers = {}) {
     const values = new Map(
         Object.entries(headers).map(([key, value]) => [
             key.toLowerCase(),
             String(value),
         ])
     );
+    let index = 0;
+    let cancelled = false;
+    let cancelCalls = 0;
+    let bodyCancelCalls = 0;
+    let getReaderCalls = 0;
+    let textCalls = 0;
+    let arrayBufferCalls = 0;
     return {
         ok: status >= 200 && status < 300,
         status,
         headers: {
             get: key => values.get(String(key).toLowerCase()) ?? null,
         },
-        text: async () => typeof body === 'string'
-            ? body
-            : JSON.stringify(body),
+        text: async () => {
+            textCalls++;
+            throw new Error('text() should not fully buffer oversized bodies');
+        },
+        arrayBuffer: async () => {
+            arrayBufferCalls++;
+            throw new Error('arrayBuffer() should not fully buffer streamed bodies');
+        },
+        body: {
+            async cancel() {
+                bodyCancelCalls++;
+                cancelled = true;
+            },
+            getReader() {
+                getReaderCalls++;
+                return {
+                    async read() {
+                        if (cancelled || index >= chunks.length) {
+                            return { done: true, value: undefined };
+                        }
+                        const value = chunks[index++];
+                        return { done: false, value };
+                    },
+                    async cancel() {
+                        cancelCalls++;
+                        cancelled = true;
+                    },
+                };
+            },
+        },
+        get textCalls() {
+            return textCalls;
+        },
+        get arrayBufferCalls() {
+            return arrayBufferCalls;
+        },
+        get cancelled() {
+            return cancelled;
+        },
+        get cancelCalls() {
+            return cancelCalls;
+        },
+        get bodyCancelCalls() {
+            return bodyCancelCalls;
+        },
+        get getReaderCalls() {
+            return getReaderCalls;
+        },
+    };
+}
+
+function nonStreamingResponse(body, status = 200, headers = {}) {
+    const values = new Map(
+        Object.entries(headers).map(([key, value]) => [
+            key.toLowerCase(),
+            String(value),
+        ])
+    );
+    const text = typeof body === 'string' ? body : JSON.stringify(body);
+    const bytes = new TextEncoder().encode(text);
+    let textCalls = 0;
+    let arrayBufferCalls = 0;
+    return {
+        ok: status >= 200 && status < 300,
+        status,
+        headers: {
+            get: key => values.get(String(key).toLowerCase()) ?? null,
+        },
+        async text() {
+            textCalls++;
+            return text;
+        },
+        async arrayBuffer() {
+            arrayBufferCalls++;
+            return bytes.buffer.slice(
+                bytes.byteOffset,
+                bytes.byteOffset + bytes.byteLength
+            );
+        },
+        get textCalls() {
+            return textCalls;
+        },
+        get arrayBufferCalls() {
+            return arrayBufferCalls;
+        },
     };
 }
 
@@ -207,6 +308,400 @@ test('rejects malformed or oversized service responses', async () => {
         systemPrompt: 'Translate.',
         segments: SEGMENTS,
     }), error => error.code === 'TRANSLATION_PROTOCOL_INVALID');
+});
+
+test('rejects declared Content-Length over the response budget before reading', async () => {
+    let textCalls = 0;
+    let arrayBufferCalls = 0;
+    let response;
+    const client = createClient({
+        fetch: async () => {
+            response = textResponse('{}', 200, {
+                'content-length': String(5 * 1024 * 1024),
+            });
+            response.text = async () => {
+                textCalls++;
+                return '{}';
+            };
+            response.arrayBuffer = async () => {
+                arrayBufferCalls++;
+                return new ArrayBuffer(0);
+            };
+            return response;
+        },
+        maxAttempts: 1,
+    });
+
+    await assert.rejects(() => client.translateBatch({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate.',
+        segments: SEGMENTS,
+    }), error => error.code === 'TRANSLATION_RESPONSE_TOO_LARGE');
+    assert.equal(textCalls, 0);
+    assert.equal(arrayBufferCalls, 0);
+    assert.equal(response.cancelCalls, 1);
+});
+
+test('cancels streamed bodies that exceed the response budget without Content-Length', async () => {
+    const chunk = new Uint8Array(1024 * 1024).fill(65);
+    const response = streamResponse([chunk, chunk, chunk, chunk, chunk]);
+    const client = createClient({
+        fetch: async () => response,
+        maxAttempts: 1,
+    });
+
+    await assert.rejects(() => client.translateBatch({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate.',
+        segments: SEGMENTS,
+    }), error => error.code === 'TRANSLATION_RESPONSE_TOO_LARGE');
+    assert.equal(response.cancelled, true);
+    assert.equal(response.cancelCalls, 1);
+    assert.equal(response.textCalls, 0);
+    assert.equal(response.arrayBufferCalls, 0);
+});
+
+test('rejects misleading Content-Length when the streamed body exceeds the budget', async () => {
+    const chunk = new Uint8Array(1024 * 1024).fill(66);
+    const response = streamResponse(
+        [chunk, chunk, chunk, chunk, chunk],
+        200,
+        { 'content-length': '128' }
+    );
+    const client = createClient({
+        fetch: async () => response,
+        maxAttempts: 1,
+    });
+
+    await assert.rejects(() => client.translateBatch({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate.',
+        segments: SEGMENTS,
+    }), error => error.code === 'TRANSLATION_RESPONSE_TOO_LARGE');
+    assert.equal(response.cancelled, true);
+    assert.equal(response.cancelCalls, 1);
+});
+
+test('rejects successful responses without a readable stream before buffering', async () => {
+    const response = nonStreamingResponse(completion([{
+        id: 'segment-000001',
+        text: '译文段落。',
+    }]));
+    const client = createClient({
+        fetch: async () => response,
+        maxAttempts: 1,
+    });
+
+    await assert.rejects(() => client.translateBatch({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate.',
+        segments: SEGMENTS,
+    }), error => error.code === 'TRANSLATION_HTTP_RESPONSE_INVALID');
+    assert.equal(response.textCalls, 0);
+    assert.equal(response.arrayBufferCalls, 0);
+});
+
+test('classifies oversized error responses by HTTP status before size', async () => {
+    const client = createClient({
+        fetch: async () => textResponse('', 503, {
+            'content-length': String(9 * 1024 * 1024),
+        }),
+        maxAttempts: 1,
+    });
+
+    await assert.rejects(() => client.translateBatch({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate.',
+        segments: SEGMENTS,
+    }), error => (
+        error.code === 'TRANSLATION_HTTP_ERROR'
+        && error.status === 503
+        && error.retryable === true
+    ));
+});
+
+test('honours Retry-After on oversized HTTP error responses', async () => {
+    const delays = [];
+    const responses = [
+        textResponse('', 429, {
+            'content-length': String(9 * 1024 * 1024),
+            'retry-after': '2',
+        }),
+        textResponse(completion([{
+            id: 'segment-000001',
+            text: 'Recovered translation.',
+        }])),
+    ];
+    const client = createClient({
+        fetch: async () => responses.shift(),
+        sleep: async milliseconds => {
+            delays.push(milliseconds);
+        },
+        maxAttempts: 2,
+        now: () => 0,
+    });
+
+    const result = await client.translateBatch({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate.',
+        segments: SEGMENTS,
+    });
+    assert.equal(result.get('segment-000001'), 'Recovered translation.');
+    assert.ok(delays.includes(2000));
+});
+
+test('parses a streamed response within the response budget', async () => {
+    const payload = JSON.stringify(completion([{
+        id: 'segment-000001',
+        text: '译文段落。',
+    }]));
+    const client = createClient({
+        fetch: async () => streamResponse([new TextEncoder().encode(payload)]),
+    });
+
+    const result = await client.translateBatch({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate.',
+        segments: SEGMENTS,
+    });
+    assert.deepEqual([...result], [['segment-000001', '译文段落。']]);
+});
+
+test('decodes multibyte response text split across stream chunks', async () => {
+    const payload = JSON.stringify(completion([{
+        id: 'segment-000001',
+        text: '译文段落。',
+    }]));
+    const bytes = new TextEncoder().encode(payload);
+    const split = bytes.indexOf(0xe8) + 1;
+    const client = createClient({
+        fetch: async () => streamResponse([
+            bytes.slice(0, split),
+            bytes.slice(split),
+        ]),
+    });
+
+    const result = await client.translateBatch({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate.',
+        segments: SEGMENTS,
+    });
+    assert.equal(result.get('segment-000001'), '译文段落。');
+});
+
+test('preserves size errors when stream cancellation is synchronous', async () => {
+    const chunk = new Uint8Array(1024 * 1024).fill(67);
+    const response = streamResponse([chunk, chunk, chunk, chunk, chunk]);
+    const getReader = response.body.getReader.bind(response.body);
+    response.body.getReader = () => {
+        const reader = getReader();
+        reader.cancel = () => undefined;
+        return reader;
+    };
+    const client = createClient({
+        fetch: async () => response,
+        maxAttempts: 1,
+    });
+
+    await assert.rejects(() => client.translateBatch({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate.',
+        segments: SEGMENTS,
+    }), error => error.code === 'TRANSLATION_RESPONSE_TOO_LARGE');
+});
+
+test('preserves size errors when stream cancellation rejects', async () => {
+    const chunk = new Uint8Array(1024 * 1024).fill(68);
+    const response = streamResponse([chunk, chunk, chunk, chunk, chunk]);
+    const getReader = response.body.getReader.bind(response.body);
+    response.body.getReader = () => {
+        const reader = getReader();
+        reader.cancel = async () => {
+            throw new Error('stream already errored');
+        };
+        return reader;
+    };
+    const client = createClient({
+        fetch: async () => response,
+        maxAttempts: 1,
+    });
+
+    await assert.rejects(() => client.translateBatch({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate.',
+        segments: SEGMENTS,
+    }), error => error.code === 'TRANSLATION_RESPONSE_TOO_LARGE');
+});
+
+test('reports timeouts that occur while reading the response body', async () => {
+    let cancelCalls = 0;
+    const client = createClient({
+        fetch: async (_url, options) => ({
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            body: {
+                getReader() {
+                    return {
+                        read() {
+                            return new Promise((_resolve, reject) => {
+                                options.signal.addEventListener('abort', () => {
+                                    reject(options.signal.reason);
+                                }, { once: true });
+                            });
+                        },
+                        async cancel() {
+                            cancelCalls++;
+                        },
+                    };
+                },
+            },
+        }),
+        timeoutMs: 10,
+        maxAttempts: 1,
+    });
+
+    await assert.rejects(() => client.translateBatch({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate.',
+        segments: SEGMENTS,
+    }), error => (
+        error.code === 'TRANSLATION_TIMEOUT'
+        && error.retryable === true
+    ));
+    assert.equal(cancelCalls, 1);
+});
+
+test('retries network failures that occur while reading the response body', async () => {
+    let calls = 0;
+    const client = createClient({
+        fetch: async () => {
+            calls++;
+            if (calls === 1) {
+                return {
+                    ok: true,
+                    status: 200,
+                    headers: { get: () => null },
+                    body: {
+                        getReader() {
+                            return {
+                                async read() {
+                                    throw new Error('NS_ERROR_NET_RESET');
+                                },
+                                async cancel() {},
+                            };
+                        },
+                    },
+                };
+            }
+            return textResponse(completion([{
+                id: 'segment-000001',
+                text: 'Recovered translation.',
+            }]));
+        },
+        maxAttempts: 2,
+    });
+
+    const result = await client.translateBatch({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate.',
+        segments: SEGMENTS,
+    });
+    assert.equal(result.get('segment-000001'), 'Recovered translation.');
+    assert.equal(calls, 2);
+});
+
+test('cancels a reader when the caller aborts during body streaming', async () => {
+    const caller = new AbortController();
+    let startReading;
+    const reading = new Promise(resolve => {
+        startReading = resolve;
+    });
+    let cancelCalls = 0;
+    const client = createClient({
+        fetch: async (_url, options) => ({
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            body: {
+                getReader() {
+                    return {
+                        read() {
+                            startReading();
+                            return new Promise((_resolve, reject) => {
+                                options.signal.addEventListener('abort', () => {
+                                    reject(options.signal.reason);
+                                }, { once: true });
+                            });
+                        },
+                        async cancel() {
+                            cancelCalls++;
+                        },
+                    };
+                },
+            },
+        }),
+        maxAttempts: 1,
+    });
+    const pending = client.translateBatch({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate.',
+        segments: SEGMENTS,
+        signal: caller.signal,
+    });
+    await reading;
+    caller.abort();
+
+    await assert.rejects(
+        () => pending,
+        error => error.code === 'TRANSLATION_ABORTED'
+            || error.name === 'AbortError'
+    );
+    assert.equal(cancelCalls, 1);
+});
+
+test('computes HTTP-date Retry-After from the injected clock', async () => {
+    const now = Date.UTC(2026, 7, 8, 7, 0, 0);
+    const delays = [];
+    const responses = [
+        textResponse('', 429, {
+            'retry-after': new Date(now + 2000).toUTCString(),
+        }),
+        textResponse(completion([{
+            id: 'segment-000001',
+            text: 'Recovered translation.',
+        }])),
+    ];
+    const client = createClient({
+        fetch: async () => responses.shift(),
+        sleep: async milliseconds => {
+            delays.push(milliseconds);
+        },
+        now: () => now,
+        maxAttempts: 2,
+    });
+
+    const result = await client.translateBatch({
+        service: SERVICE,
+        targetLanguage: 'zh-CN',
+        systemPrompt: 'Translate.',
+        segments: SEGMENTS,
+    });
+    assert.equal(result.get('segment-000001'), 'Recovered translation.');
+    assert.ok(delays.includes(2000));
 });
 
 test('stops immediately when the service rejects its configuration', async () => {
